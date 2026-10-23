@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import http.client
 import json
 import math
 import mimetypes
@@ -166,11 +167,14 @@ def multipart(fields: dict, files: list[tuple[str, Path]]) -> tuple[bytes, str]:
 
 
 class Client:
-    def __init__(self, base: str, key: str, timeout: float = 300):
+    def __init__(self, base: str, key: str, timeout: float = 300, no_proxy: bool = False):
         self.base = api_base(base)
         self.key = key
         self.timeout = timeout
-        self.opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        handlers = [NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context())]
+        if no_proxy:
+            handlers.insert(0, urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def endpoint(self, path: str) -> str:
         return self.base + "/" + path.lstrip("/")
@@ -184,8 +188,11 @@ class Client:
             body = json.dumps(fields, ensure_ascii=False, allow_nan=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.endpoint(path), data=body, headers=headers, method=method)
+        started = time.monotonic()
+        phase = "before response headers"
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
+                phase = "while reading response body"
                 raw = response.read(32 * 1024 * 1024 + 1)
                 if len(raw) > 32 * 1024 * 1024:
                     raise MediaError("JSON response exceeds 32 MiB; request fewer images or use URL responses.")
@@ -198,9 +205,10 @@ class Client:
             detail = str(redact(detail, self.key))[:1500]
             suffix = " Creation was not retried; check the provider before submitting again." if method == "POST" else ""
             raise MediaError(f"HTTP {exc.code}: {detail}.{suffix}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError) as exc:
             suffix = " Creation was not retried; the provider may already have accepted it." if method == "POST" else ""
-            raise MediaError(f"Network request failed: {redact(str(exc), self.key)}.{suffix}") from exc
+            elapsed = time.monotonic() - started
+            raise MediaError(f"Network request failed ({type(exc).__name__}, {phase}, {elapsed:.1f}s): {redact(str(exc), self.key)}.{suffix}") from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise MediaError("The relay returned invalid JSON.") from exc
 
@@ -242,7 +250,7 @@ class Client:
                     part.rename(destination)
                     return destination.resolve()
             raise MediaError("Too many media download redirects.")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError) as exc:
             raise MediaError(f"Media download failed: {redact(str(exc), self.key)}") from exc
         finally:
             if created_part:
@@ -407,7 +415,7 @@ def execute(args) -> dict:
     base = args.base_url or os.getenv("RELAY_BASE_URL")
     key = os.getenv("RELAY_API_KEY", "").strip()
     if args.command == "doctor":
-        return {"base_url": api_base(base) if base else None, "key_configured": bool(key), "image_model": os.getenv("RELAY_IMAGE_MODEL", "gpt-image-2.5"), "video_model": os.getenv("RELAY_VIDEO_MODEL"), "python": sys.version.split()[0], "network_checked": False}
+        return {"base_url": api_base(base) if base else None, "key_configured": bool(key), "image_model": os.getenv("RELAY_IMAGE_MODEL", "gpt-image-2.5"), "video_model": os.getenv("RELAY_VIDEO_MODEL"), "python": sys.version.split()[0], "network_route": "direct" if args.no_proxy else "system_proxy_settings", "network_checked": False}
     prepared = None
     if args.command in {"image", "video"}:
         prepared = image_payload(args) if args.command == "image" else video_payload(args)
@@ -416,7 +424,7 @@ def execute(args) -> dict:
             return {"dry_run": True, "method": "POST", "endpoint": api_base(base) + "/" + path if base else "<RELAY_BASE_URL>/v1/" + path, "encoding": "multipart" if files or getattr(args, "encoding", "auto") == "multipart" else "json", "body": fields, "files": [{"field": name, "path": str(path)} for name, path in files], "authorization": "Bearer [RELAY_API_KEY]"}
     if not base or not key:
         raise MediaError("Configure RELAY_BASE_URL and RELAY_API_KEY, or use --base-url with RELAY_API_KEY. Store the key locally; do not paste it into chat.")
-    client = Client(base, key, args.timeout)
+    client = Client(base, key, args.timeout, no_proxy=args.no_proxy)
     if args.command == "models":
         data = client.request("GET", "models")
         values = data.get("data", []) if isinstance(data, dict) else data
@@ -427,7 +435,14 @@ def execute(args) -> dict:
     directory = run_dir(args.output_dir, args.command)
     if args.command == "image":
         path, fields, files = prepared
-        data = client.request("POST", path, fields, files)
+        try:
+            data = client.request("POST", path, fields, files)
+        except MediaError as exc:
+            failure_file = directory / "failure.json"
+            save_json(failure_file, {"model": fields["model"], "endpoint": client.endpoint(path),
+                      "timeout_seconds": args.timeout, "network_route": "direct" if args.no_proxy else "system_proxy_settings",
+                      "error": str(exc), "automatically_retried": False}, key)
+            raise MediaError(f"{exc} Details: {failure_file}") from exc
         save_json(directory / "response.json", data, key)
         values = data.get("data") if isinstance(data, dict) else None
         if not isinstance(values, list) or not values:
@@ -477,6 +492,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--env-file", help="Explicit local env file; existing environment variables take precedence")
     root.add_argument("--base-url", help="Relay API origin or base ending in /v1")
     root.add_argument("--timeout", type=positive_float, default=300, help="API request timeout in seconds (default: 300)")
+    root.add_argument("--no-proxy", action="store_true", help="Connect directly, ignoring system and environment proxy settings for this invocation")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="Inspect local configuration without network access")
     models = sub.add_parser("models", help="List model IDs enabled for this key")

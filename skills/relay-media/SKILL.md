@@ -10,6 +10,7 @@ Use `scripts/media.py` relative to this skill directory. It requires Python 3.10
 ## Configuration and model choice
 
 - Run `python <skill-dir>/scripts/media.py doctor` to inspect configuration without a request. `RELAY_BASE_URL` selects the user's relay; `RELAY_API_KEY` contains its key. An explicit `--env-file <local-file>` is supported before the subcommand. Existing environment variables take precedence.
+- Requests use system proxy settings by default. For a suspected proxy disconnect, use global `--no-proxy` to connect directly for that invocation; it does not change system settings. A disconnected image request may already be billed, so check its saved `failure.json` and provider history before resubmitting.
 - If configuration is missing, ask the user to configure it locally. Never ask for a key in chat, put a key in command arguments, or inspect unrelated credential files. Do not change the relay or borrow another service's key.
 - `models` performs a read-only `/v1/models` lookup. Honor the exact requested model. Only `image2` expands to `gpt-image-2`; all other model IDs pass through unchanged. Image default: `RELAY_IMAGE_MODEL` or `gpt-image-2.5`. Videos require `--model` or `RELAY_VIDEO_MODEL`.
 - A model catalog does not establish account permissions or parameter support. Explain a provider rejection instead of silently substituting another model.

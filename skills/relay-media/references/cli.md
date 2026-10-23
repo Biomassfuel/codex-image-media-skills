@@ -20,6 +20,8 @@ python <skill-dir>/scripts/media.py --base-url https://your-relay.example/v1 mod
 
 Env files accept only these assignments, optionally quoted, blank lines and `#` comments. They do not execute code, expand variables, load automatically or override existing variables. HTTPS is required except for localhost development. `doctor` checks configuration without network access; `models [--contains text]` lists account-visible IDs.
 
+Global `--no-proxy` ignores system and environment proxies for this invocation, including media downloads. Omit it to retain the normal system route. A longer `--timeout` cannot prevent a proxy or server from closing the connection earlier. For diagnostics, `doctor` reports the selected route without exposing proxy credentials.
+
 ## Images
 
 `image` requires exactly one of `--prompt` and `--prompt-file`.
@@ -63,7 +65,7 @@ Without reference files, requests use JSON generation. With references, requests
 
 Image/video/status/download commands accept `--output-dir` (default `outputs`), `--download-timeout` (default 300 seconds per connection) and `--max-download-mb` (default 1024). Each invocation creates a unique child directory without overwriting prior files.
 
-- Images: generated files, sanitized `response.json`, and `result.json`. Base64 is omitted from snapshots.
+- Images: generated files, sanitized `response.json`, and `result.json`. Base64 is omitted from snapshots. A failed HTTP request saves sanitized `failure.json` with the model, endpoint, route, timeout and error; transport errors include the exception type, response phase and elapsed time.
 - Videos: sanitized `job.json` before polling/downloading; `result.json` on normal return; downloaded content when complete. Terminal failures retain the error snapshot. Another query can create another directory for the same job.
 - Prompts and signed URLs may appear in metadata. Keep them local; the repository ignores generated outputs.
 

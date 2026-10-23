@@ -32,7 +32,7 @@ class MediaReviewTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="relay-review-tests-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def client(self):
         client = media.Client("https://relay.invalid/v1", "test-only-key")

@@ -22,7 +22,7 @@ class InstallTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "repo" / "skills" / "relay-media"
         self.source.mkdir(parents=True)
         (self.source / "SKILL.md").write_text("---\nname: relay-media\ndescription: Generate media.\n---\n", encoding="utf-8")

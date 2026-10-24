@@ -100,7 +100,7 @@ class MediaTransportTests(unittest.TestCase):
             global_options.append("--no-proxy")
         return subprocess.run(
             [sys.executable, str(CLI), *global_options, "image", "--model", "gpt-image-2.5",
-             "--prompt", "offline loopback transport regression", "--output-dir", str(self.root / "outputs")],
+             "--prompt", "offline loopback transport regression", "--unattended", "--output-dir", str(self.root / "outputs")],
             cwd=self.root, env=environment, capture_output=True, text=True, encoding="utf-8", timeout=10,
         )
 

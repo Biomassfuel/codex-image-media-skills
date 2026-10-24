@@ -1,0 +1,129 @@
+{
+  "schema": 3,
+  "updated": "2026-10-24",
+  "notes": [
+    "Allowed values only. The client rejects anything outside these lists, so a caller picks from options instead of inventing parameters.",
+    "The size menu is exactly these 12 canvases; auto is intentionally not offered as a size. Omit --size only when the provider default is explicitly wanted.",
+    "Menu labels follow the product UI: 2048x... is 2K; 2560x... and 3840x... are 4K.",
+    "source=observed means the value came from a real response; source=documented means it follows the GPT Image compatible contract and has not been individually confirmed against this relay.",
+    "size_reliability values: observed = some canvases confirmed on this relay; documented = contract only; ignored = observed to ignore the size parameter; fixed = one native canvas.",
+    "verified lists the values this relay has actually delivered at the requested canvas; the client still reports sizes and warns when the delivered canvas differs.",
+    "Probed on 2026-10-24 with gpt-image-2: 2048x2048 came back exactly, while 3840x2160 came back as 3838x2160, so treat the largest sizes as approximate.",
+    "Edit this file to add a model or correct a limit; no code change is needed."
+  ],
+  "image_models": {
+    "gpt-image-2": {
+      "label": "GPT Image 2",
+      "source": "observed",
+      "edit": true,
+      "size_reliability": "observed",
+      "size_note": "Observed 2048x2048 exact; 3840x2160 returned 3838x2160. Treat the largest sizes as approximate.",
+      "size": {
+        "mode": "enum",
+        "values": ["1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x2048", "2048x1152", "1152x2048", "2560x1440", "1440x2560", "3840x2160", "2160x3840"],
+        "verified": ["2048x2048"],
+        "default": "1024x1024"
+      },
+      "quality": {
+        "mode": "enum",
+        "values": ["auto", "low", "medium", "high"],
+        "default": "auto"
+      },
+      "background": {
+        "mode": "enum",
+        "values": ["auto", "opaque", "transparent"],
+        "default": null
+      },
+      "output_format": {
+        "mode": "enum",
+        "values": ["png", "jpeg", "webp"],
+        "default": null
+      }
+    },
+    "gpt-image-2.5": {
+      "label": "GPT Image 2.5",
+      "source": "documented",
+      "edit": true,
+      "size_reliability": "documented",
+      "size_note": "Follows the documented GPT Image size contract; not individually verified on this relay.",
+      "size": {
+        "mode": "enum",
+        "values": ["1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x2048", "2048x1152", "1152x2048", "2560x1440", "1440x2560", "3840x2160", "2160x3840"],
+        "verified": [],
+        "default": "1024x1024"
+      },
+      "quality": {
+        "mode": "enum",
+        "values": ["auto", "low", "medium", "high"],
+        "default": "auto"
+      },
+      "background": {
+        "mode": "enum",
+        "values": ["auto", "opaque", "transparent"],
+        "default": null
+      },
+      "output_format": {
+        "mode": "enum",
+        "values": ["png", "jpeg", "webp"],
+        "default": null
+      }
+    },
+    "gpt-image-2.5-flare": {
+      "label": "GPT Image 2.5 Flare",
+      "source": "observed",
+      "edit": true,
+      "size_reliability": "ignored",
+      "size_note": "Observed 2026-10-24: requested 1536x1024, delivered 1024x1536. The model may ignore --size; choose gpt-image-2 or gpt-image-2.5 when the exact canvas matters.",
+      "size": {
+        "mode": "enum",
+        "values": ["1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x2048", "2048x1152", "1152x2048", "2560x1440", "1440x2560", "3840x2160", "2160x3840"],
+        "verified": [],
+        "default": "1536x1024"
+      },
+      "quality": {
+        "mode": "enum",
+        "values": ["auto", "low", "medium", "high"],
+        "default": "auto"
+      },
+      "background": {
+        "mode": "enum",
+        "values": ["auto", "opaque", "transparent"],
+        "default": null
+      },
+      "output_format": {
+        "mode": "enum",
+        "values": ["png", "jpeg", "webp"],
+        "default": null
+      }
+    },
+    "gpt-image-2.5-sunburst": {
+      "label": "GPT Image 2.5 Sunburst",
+      "source": "observed",
+      "edit": true,
+      "size_reliability": "documented",
+      "size_note": "The 12-size menu applies to this model. An earlier 1024x1024 request returned 1254x1254; check the delivered canvas and warnings.",
+      "note": "Earlier observation: a 1024x1024 request returned 1254x1254. Size selection is offered now; the client reports any delivered-canvas mismatch.",
+      "size": {
+        "mode": "enum",
+        "values": ["1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x2048", "2048x1152", "1152x2048", "2560x1440", "1440x2560", "3840x2160", "2160x3840"],
+        "verified": [],
+        "default": "1024x1024"
+      },
+      "quality": {
+        "mode": "enum",
+        "values": ["auto", "low", "medium", "high"],
+        "default": "auto"
+      },
+      "background": {
+        "mode": "enum",
+        "values": ["auto", "opaque", "transparent"],
+        "default": null
+      },
+      "output_format": {
+        "mode": "enum",
+        "values": ["png", "jpeg", "webp"],
+        "default": null
+      }
+    }
+  }
+}

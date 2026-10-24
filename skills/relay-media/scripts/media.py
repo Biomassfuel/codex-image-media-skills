@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import ssl
+import struct
 import sys
 import time
 from typing import Any
@@ -25,6 +26,67 @@ import uuid
 
 IMAGE_ALIASES = {"image2": "gpt-image-2"}
 IMAGE_MODELS = ("gpt-image-2", "gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst")
+DEFAULT_IMAGE_MODEL = "gpt-image-2.5"
+MENU_VERSION = "2026-10-24.4"
+CATALOG_FILE = Path(__file__).resolve().parent.parent / "references" / "model-catalog.json"
+IMAGE_OPTIONS = ("size", "quality", "background", "output_format")
+PROMPT_MODES = (
+    {
+        "id": "original",
+        "label_zh": "原版直出",
+        "label_en": "Original",
+        "description_zh": "用你刚才的描述直接生成，不改写提示词。",
+        "description_en": "Use the user's description verbatim; no prompt rewriting.",
+    },
+    {
+        "id": "optimized-1",
+        "label_zh": "优化 A｜忠实增强",
+        "label_en": "Option A - Faithful enhancement",
+        "description_zh": "保留原意，补足构图、光线、材质和背景。",
+        "description_en": "Keep the intent; add composition, lighting, materials and background.",
+    },
+    {
+        "id": "optimized-2",
+        "label_zh": "优化 B｜风格强化",
+        "label_en": "Option B - Style-led",
+        "description_zh": "选定一种统一的视觉语言，让画面更有辨识度。",
+        "description_en": "Commit to one coherent visual language for a stronger look.",
+    },
+    {
+        "id": "optimized-3",
+        "label_zh": "优化 C｜商业成片",
+        "label_en": "Option C - Commercial layout",
+        "description_zh": "留出文案空间和干净背景，适合海报、电商和社媒。",
+        "description_en": "Build negative space and a clean background for posters, e-commerce and social.",
+    },
+)
+QUALITY_TEXT = {
+    "auto": ("自动", "由模型决定，通常最稳妥。", "Auto", "Let the model decide; usually the safest."),
+    "low": ("低", "最快、最省，适合草稿。", "Low", "Fastest and cheapest; good for drafts."),
+    "medium": ("中", "质量与速度平衡。", "Medium", "Balanced quality and speed."),
+    "high": ("高", "细节最多，通常最慢、最贵。", "High", "Most detail; usually slower and more expensive."),
+}
+ORIENTATION_TEXT = {
+    "square": ("方形", "Square"),
+    "landscape": ("横屏", "Landscape"),
+    "portrait": ("竖屏", "Portrait"),
+}
+SIZE_TIERS = {
+    "2048x2048": "2K",
+    "2048x1152": "2K",
+    "1152x2048": "2K",
+    "2560x1440": "4K",
+    "1440x2560": "4K",
+    "3840x2160": "4K",
+    "2160x3840": "4K",
+}
+MODEL_ORDER = ("gpt-image-2.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst")
+MODEL_ROLES = {
+    "gpt-image-2.5": ("画质优先", "Quality first"),
+    "gpt-image-2": ("精确尺寸优先", "Exact canvas first"),
+    "gpt-image-2.5-flare": ("风格化；可能忽略尺寸", "Style-led; may ignore size"),
+    "gpt-image-2.5-sunburst": ("方形风格；支持 12 种尺寸", "Square style; supports 12 sizes"),
+}
 DONE = {"completed", "succeeded", "success", "finished", "done"}
 FAILED = {"failed", "failure", "error", "cancelled", "canceled", "expired"}
 PENDING = {"queued", "pending", "submitted", "created"}
@@ -367,13 +429,312 @@ def video_result(client: Client, data: dict, args, directory: Path) -> dict:
     return result
 
 
+def load_catalog() -> dict:
+    """Read the local model catalog; a missing file means no constraints are configured."""
+    try:
+        data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema": 0, "image_models": {}}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MediaError(f"Cannot read the model catalog at {CATALOG_FILE}: {exc}") from exc
+    models = data.get("image_models") if isinstance(data, dict) else None
+    if not isinstance(models, dict):
+        raise MediaError(f"The model catalog at {CATALOG_FILE} has no image_models object.")
+    return data
+
+
+def option_spec(profile: dict, name: str) -> dict:
+    spec = profile.get(name) if isinstance(profile, dict) else None
+    return spec if isinstance(spec, dict) else {"mode": "none"}
+
+
+def size_option(value: str) -> dict:
+    """Describe a catalog size for a menu without changing the value sent to the API."""
+    match = re.fullmatch(r"(\d+)x(\d+)", value)
+    if not match:
+        return {"value": value, "label": value, "width": None, "height": None, "aspect": None, "orientation": None, "tier": None}
+    width, height = int(match.group(1)), int(match.group(2))
+    divisor = math.gcd(width, height) or 1
+    aspect = f"{width // divisor}:{height // divisor}"
+    orientation = "square" if width == height else "landscape" if width > height else "portrait"
+    tier = SIZE_TIERS.get(value)
+    if tier is None:
+        long_edge = max(width, height)
+        tier = "4K" if long_edge >= 3840 else "2K" if long_edge >= 2048 else None
+    label = f"{width}×{height}" + (f" · {tier}" if tier else "")
+    return {"value": value, "label": label, "width": width, "height": height, "aspect": aspect, "orientation": orientation, "tier": tier}
+
+
+def localized(entry: dict, field: str, lang: str) -> str:
+    suffix = "zh" if lang == "zh" else "en"
+    return str(entry.get(f"{field}_{suffix}") or entry.get(field) or "")
+
+
+def prompt_option(mode: dict, index: int, lang: str) -> dict:
+    return {
+        "index": index,
+        "id": mode.get("id", f"mode-{index}"),
+        "label": localized(mode, "label", lang),
+        "description": localized(mode, "description", lang),
+        "recommended": mode.get("id") == "optimized-1",
+    }
+
+
+def quality_option(value: str, default: str | None, lang: str) -> dict:
+    text = QUALITY_TEXT.get(value)
+    if text:
+        label, description = (text[0], text[1]) if lang == "zh" else (text[2], text[3])
+    else:
+        label, description = value, ""
+    return {"value": value, "label": label, "description": description, "recommended": value == default}
+
+
+def model_option(model_id: str, profile: dict, selected: str, lang: str) -> dict:
+    size_spec = option_spec(profile, "size")
+    quality_spec = option_spec(profile, "quality")
+    role = MODEL_ROLES.get(model_id, ("", ""))[0 if lang == "zh" else 1]
+    return {
+        "id": model_id,
+        "label": profile.get("label", model_id),
+        "role": role,
+        "edit": bool(profile.get("edit")),
+        "size_mode": size_spec.get("mode", "none"),
+        "size_count": len(size_spec.get("values") or []),
+        "default_size": size_spec.get("default") or size_spec.get("value"),
+        "quality_values": [str(value) for value in (quality_spec.get("values") or [])],
+        "size_reliability": profile.get("size_reliability", "unknown"),
+        "size_note": profile.get("size_note", ""),
+        "selected": model_id == selected,
+        "recommended": model_id == "gpt-image-2.5",
+    }
+
+
+def choices_payload(catalog: dict, model: str | None, lang: str) -> dict:
+    """Build the offline model/prompt/size/quality menu shown before an image request."""
+    explicit_model = model is not None
+    requested = model or os.getenv("RELAY_IMAGE_MODEL") or DEFAULT_IMAGE_MODEL
+    resolved = IMAGE_ALIASES.get(requested, requested)
+    profiles = catalog.get("image_models") if isinstance(catalog.get("image_models"), dict) else {}
+    profile = profiles.get(resolved) if explicit_model and isinstance(profiles, dict) else None
+    zh = lang == "zh"
+    model_ids = sorted(
+        profiles,
+        key=lambda item: (MODEL_ORDER.index(item) if item in MODEL_ORDER else len(MODEL_ORDER), item),
+    )
+    result = {
+        "menu_version": MENU_VERSION,
+        "model": resolved if explicit_model else None,
+        "label": profile.get("label", resolved) if isinstance(profile, dict) else None,
+        "cataloged": isinstance(profile, dict),
+        "language": lang,
+        "model_required": not explicit_model,
+        "selection_order": ["model", "prompt", "supplement", "size", "quality"],
+        "model_question": "选择模型" if zh else "Choose a model",
+        "model_options": [model_option(item, profiles[item], resolved if explicit_model else "", lang) for item in model_ids],
+        "prompt": {
+            "question": "选择提示词版本" if zh else "Choose a prompt version",
+            "options": [prompt_option(mode, index, lang) for index, mode in enumerate(PROMPT_MODES)],
+        },
+        "supplement": {
+            "question": "补充提示词（可选）" if zh else "Additional prompt details (optional)",
+            "free_text": True,
+            "placeholder": "例如：加一行英文标题 / 不要文字 / 背景更虚化" if zh else "e.g. add a headline / no text / blur the background",
+            "hint": "可以直接输入要补充的要求；没有就回复“无”。" if zh else "Type any extra requirements, or reply \"none\".",
+            "examples": (
+                ["加一行标题：\"...\"", "背景更虚化，保留主体", "不要文字、水印或 logo", "服装/道具/光线改成..."]
+                if zh
+                else ["Add a headline: \"...\"", "Blur the background more; keep the subject", "No text, watermark or logo", "Change the outfit/prop/lighting to ..."]
+            ),
+        },
+    }
+
+    if not explicit_model:
+        result["next_command"] = "choices --model <model-id>"
+        result["size"] = {
+            "mode": "pending",
+            "options": [],
+            "note": "先让用户选模型，再用 choices --model <id> 获取该模型的全部尺寸。" if zh else "Ask the user to choose a model, then run choices --model <id> for its full size list.",
+        }
+        result["quality"] = {
+            "mode": "pending",
+            "options": [],
+            "note": "模型选定后再展示画质选项。" if zh else "Quality options appear after a model is selected.",
+        }
+        result["reply_hint"] = "先回复模型编号；选定后再回复提示词、分辨率、画质和补充要求。" if zh else "Reply with a model number first; then choose prompt, size, quality and any extra details."
+        return result
+
+    size_spec = option_spec(profile, "size")
+    size_mode = size_spec.get("mode", "none")
+    if not isinstance(profile, dict):
+        result["size"] = {
+            "mode": "unknown",
+            "reliability": "unknown",
+            "options": [],
+            "note": "该模型不在本地目录中；先只发提示词，尺寸和画质由服务商决定。" if zh else "This model is not in the local catalog; send the prompt only and let the provider decide size and quality.",
+        }
+    elif size_mode == "fixed":
+        fixed = str(size_spec.get("value") or "")
+        result["size"] = {
+            "mode": "fixed",
+            "value": fixed,
+            "label": size_option(fixed)["label"],
+            "reliability": profile.get("size_reliability", "fixed"),
+            "reliability_note": profile.get("size_note", ""),
+            "options": [],
+            "note": size_spec.get("note") or ("该模型固定输出 " + fixed + "，不需要选择尺寸。" if zh else "This model always returns " + fixed + "; no size choice."),
+        }
+    elif size_mode == "enum":
+        default = size_spec.get("default")
+        options = []
+        for index, raw in enumerate(size_spec.get("values") or [], 1):
+            value = str(raw)
+            option = {"index": index, **size_option(value)}
+            orientation = option.get("orientation")
+            option["orientation_label"] = (ORIENTATION_TEXT[orientation][0 if zh else 1] if orientation in ORIENTATION_TEXT else "")
+            option["recommended"] = value == default
+            options.append(option)
+        pages = [list(range(start, min(start + 4, len(options) + 1))) for start in range(1, len(options) + 1, 4)]
+        result["size"] = {
+            "mode": "enum",
+            "default": default,
+            "reliability": profile.get("size_reliability", "unknown"),
+            "reliability_note": profile.get("size_note", ""),
+            "do_not_filter": True,
+            "page_size": 4,
+            "pages": pages,
+            "options": options,
+            "note": "展示全部尺寸，不要按构图删减；回复编号即可，尺寸值会原样发送给模型。" if zh else "Show every size; do not filter by composition. Reply with a number; the exact value is sent to the model.",
+        }
+    else:
+        result["size"] = {"mode": size_mode, "options": [], "note": "该模型没有可用的尺寸选项。" if zh else "This model has no size options."}
+
+    quality_spec = option_spec(profile, "quality")
+    quality_mode = quality_spec.get("mode", "none")
+    if quality_mode == "fixed":
+        fixed = str(quality_spec.get("value") or "")
+        result["quality"] = {"mode": "fixed", "value": fixed, "options": [], "note": "该模型固定使用 " + fixed + " 画质。" if zh else "This model always uses " + fixed + " quality."}
+    else:
+        default = quality_spec.get("default")
+        values = [str(value) for value in (quality_spec.get("values") or [])]
+        result["quality"] = {
+            "mode": quality_mode,
+            "default": default,
+            "options": [quality_option(value, default, lang) for value in values],
+            "note": "" if values else ("该模型没有可用的画质选项。" if zh else "This model has no quality options."),
+        }
+
+    result["reply_hint"] = (
+        "按“模型 提示词 分辨率 画质”的顺序回复编号即可，例如 1 1 7 1；补充要求写在后面，没有就写“无”。"
+        if zh
+        else "Reply with model, prompt, size and quality numbers in order, e.g. 1 1 7 1; append extra requirements or say \"none\"."
+    )
+    return result
+
+
+def chosen_value(profile: dict, name: str, model: str, value):
+    """Return the value to send, rejecting anything the catalog does not allow."""
+    label = name.replace("_", "-")
+    spec = option_spec(profile, name)
+    mode = spec.get("mode", "none")
+    if mode == "fixed":
+        fixed = spec.get("value")
+        if value is not None and value != fixed:
+            note = spec.get("note") or f"Omit --{label} to accept the fixed value."
+            raise MediaError(f"{model} always returns {fixed}, so --{label} {value} cannot be honored. {note}")
+        return None
+    values = [str(item) for item in (spec.get("values") or [])]
+    if value is None:
+        return None
+    if mode != "enum" or not values:
+        raise MediaError(f"{model} does not accept --{label}. Omit it or choose a model that supports it.")
+    if value not in values:
+        raise MediaError(f"Unsupported --{label} '{value}' for {model}. Choose one of: " + ", ".join(values))
+    return value
+
+
+def png_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        return struct.unpack(">II", data[16:24])
+    return None
+
+
+def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    index = 2
+    while index + 9 <= len(data):
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        if marker == 0xFF:
+            index += 1
+            continue
+        if marker in {0xD8, 0xD9, 0x01} or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        length = int.from_bytes(data[index + 2:index + 4], "big")
+        if length < 2:
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in {0xC4, 0xC8, 0xCC}:
+            height = int.from_bytes(data[index + 5:index + 7], "big")
+            width = int.from_bytes(data[index + 7:index + 9], "big")
+            return (width, height) if width and height else None
+        index += 2 + length
+    return None
+
+
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    return png_dimensions(data) or jpeg_dimensions(data)
+
+
+def file_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as stream:
+            return image_dimensions(stream.read(256 * 1024))
+    except OSError:
+        return None
+
+
 def image_payload(args) -> tuple[str, dict, list]:
-    model = args.model or os.getenv("RELAY_IMAGE_MODEL") or "gpt-image-2.5"
-    fields = {"model": IMAGE_ALIASES.get(model, model), "prompt": read_prompt(args), "n": args.n}
-    for name in ("size", "quality", "background", "output_format"):
-        value = getattr(args, name)
-        if value is not None:
-            fields[name] = value
+    profiles = load_catalog()["image_models"]
+    unattended = bool(getattr(args, "unattended", False))
+    if not args.model and not unattended:
+        raise MediaError(
+            "missing_selection: choose an explicit --model. Run 'choices' without --model, "
+            "ask the user to pick a model, then run 'choices --model <id>'. "
+            "Do not guess or use RELAY_IMAGE_MODEL for an interactive request."
+        )
+    requested = args.model or os.getenv("RELAY_IMAGE_MODEL") or DEFAULT_IMAGE_MODEL
+    model = IMAGE_ALIASES.get(requested, requested)
+    profile = profiles.get(model)
+    if profile is not None and not unattended:
+        missing = []
+        if option_spec(profile, "size").get("mode") == "enum" and not args.size:
+            missing.append("--size")
+        if option_spec(profile, "quality").get("mode") == "enum" and not args.quality:
+            missing.append("--quality")
+        if missing:
+            raise MediaError(
+                "missing_selection: " + ", ".join(missing) + ". Ask the user to choose from the full "
+                "choices menu, then pass the exact values. Do not use provider defaults or guess."
+            )
+    fields = {"model": model, "prompt": read_prompt(args), "n": args.n}
+    if profile is None:
+        supplied = [name for name in IMAGE_OPTIONS if getattr(args, name) is not None]
+        if supplied and not getattr(args, "allow_unverified", False):
+            flags = ", ".join("--" + name.replace("_", "-") for name in supplied)
+            raise MediaError(
+                f"'{model}' is not in the verified catalog, so {flags} cannot be validated. "
+                "Run 'catalog' and pick a cataloged model, or pass --allow-unverified to send raw values."
+            )
+        for name in supplied:
+            fields[name] = getattr(args, name)
+    else:
+        for name in IMAGE_OPTIONS:
+            value = chosen_value(profile, name, model, getattr(args, name))
+            if value is not None:
+                fields[name] = value
     fields.update(extra_fields(args.extra_json, {"model", "prompt", "n", "size", "quality", "background", "output_format", "image", "image[]", "mask"}))
     images = [local_file(value) for value in args.image]
     if args.mask and not images:
@@ -414,8 +775,31 @@ def execute(args) -> dict:
     load_env(args.env_file)
     base = args.base_url or os.getenv("RELAY_BASE_URL")
     key = os.getenv("RELAY_API_KEY", "").strip()
+    catalog = load_catalog()
     if args.command == "doctor":
-        return {"base_url": api_base(base) if base else None, "key_configured": bool(key), "image_model": os.getenv("RELAY_IMAGE_MODEL", "gpt-image-2.5"), "video_model": os.getenv("RELAY_VIDEO_MODEL"), "python": sys.version.split()[0], "network_route": "direct" if args.no_proxy else "system_proxy_settings", "network_checked": False}
+        return {"menu_version": MENU_VERSION, "base_url": api_base(base) if base else None, "key_configured": bool(key), "image_model": os.getenv("RELAY_IMAGE_MODEL", DEFAULT_IMAGE_MODEL), "video_model": os.getenv("RELAY_VIDEO_MODEL"), "catalog_models": sorted(catalog["image_models"]), "python": sys.version.split()[0], "network_route": "direct" if args.no_proxy else "system_proxy_settings", "network_checked": False}
+    if args.command == "catalog":
+        entries = []
+        for model_id in sorted(catalog["image_models"]):
+            profile = catalog["image_models"][model_id]
+            entry = {
+                "id": model_id,
+                "label": profile.get("label", model_id),
+                "source": profile.get("source", "documented"),
+                "edit": bool(profile.get("edit")),
+                "size_reliability": profile.get("size_reliability", "unknown"),
+                "size_note": profile.get("size_note", ""),
+                "size": option_spec(profile, "size"),
+                "quality": option_spec(profile, "quality"),
+                "background": option_spec(profile, "background"),
+                "output_format": option_spec(profile, "output_format"),
+            }
+            if profile.get("note"):
+                entry["note"] = profile["note"]
+            entries.append(entry)
+        return {"menu_version": MENU_VERSION, "catalog_file": str(CATALOG_FILE), "updated": catalog.get("updated"), "default_image_model": os.getenv("RELAY_IMAGE_MODEL") or DEFAULT_IMAGE_MODEL, "models": entries}
+    if args.command == "choices":
+        return choices_payload(catalog, args.model, args.lang)
     prepared = None
     if args.command in {"image", "video"}:
         prepared = image_payload(args) if args.command == "image" else video_payload(args)
@@ -448,6 +832,7 @@ def execute(args) -> dict:
         if not isinstance(values, list) or not values:
             raise MediaError(f"No data[] images in response; inspect {directory / 'response.json'}.")
         paths = []
+        dimensions: list[tuple[int, int] | None] = []
         for index, item in enumerate(values, 1):
             if not isinstance(item, dict):
                 raise MediaError("Each image result must be an object.")
@@ -461,11 +846,21 @@ def execute(args) -> dict:
                 with target.open("xb") as stream:
                     stream.write(raw)
                 paths.append(str(target.resolve()))
+                dimensions.append(image_dimensions(raw))
             elif isinstance(item.get("url"), str):
-                paths.append(str(client.download(item["url"], target, "image", args.download_timeout, int(args.max_download_mb * 1024 * 1024))))
+                saved = client.download(item["url"], target, "image", args.download_timeout, int(args.max_download_mb * 1024 * 1024))
+                paths.append(str(saved))
+                dimensions.append(file_dimensions(saved))
             else:
                 raise MediaError("An image result has neither b64_json nor url.")
         result = {"model": fields["model"], "files": paths, "response_file": str((directory / "response.json").resolve())}
+        reported = [f"{entry[0]}x{entry[1]}" for entry in dimensions if entry]
+        if reported:
+            result["sizes"] = reported
+        expected = fields.get("size") or option_spec(catalog["image_models"].get(fields["model"]) or {}, "size").get("value")
+        unexpected = sorted({size for size in reported if expected and size != expected})
+        if unexpected:
+            result["warnings"] = [f"Requested {expected} but the relay returned {', '.join(unexpected)}; the model ignored the size parameter."]
         save_json(directory / "result.json", result, key)
         return result
     if args.command == "video":
@@ -495,6 +890,10 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--no-proxy", action="store_true", help="Connect directly, ignoring system and environment proxy settings for this invocation")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="Inspect local configuration without network access")
+    sub.add_parser("catalog", help="List cataloged image models with the sizes and qualities each accepts (offline)")
+    choices = sub.add_parser("choices", help="Print the offline model, prompt, size and quality menu")
+    choices.add_argument("--model", help="Image model to describe; omit for the model-selection step")
+    choices.add_argument("--lang", choices=("zh", "en"), default="zh", help="Menu language (default: zh)")
     models = sub.add_parser("models", help="List model IDs enabled for this key")
     models.add_argument("--contains")
     for name in ("image", "video", "status", "download"):
@@ -519,6 +918,8 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--extra-json", help="Provider-specific JSON object, or @path.json")
         command.add_argument("--dry-run", action="store_true", help="Prepare a request without a key, network or output files")
         if name == "image":
+            command.add_argument("--allow-unverified", action="store_true", help="Send size/quality for a model missing from the catalog instead of rejecting it")
+            command.add_argument("--unattended", action="store_true", help="Automation/tests only: allow omitted model/size/quality and provider defaults. Never use for an interactive request")
             command.add_argument("--image", action="append", default=[], help="Local reference image; repeat for multiple inputs")
             command.add_argument("--mask")
             command.add_argument("--n", type=positive_int, default=1)

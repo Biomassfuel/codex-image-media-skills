@@ -100,7 +100,7 @@ class MediaCliTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.output = self.root / "outputs"
 
-    def run_cli(self, *args, base=None, key=SECRET):
+    def run_cli(self, *args, base=None, key=SECRET, unattended=True):
         env = {
             name: value
             for name, value in os.environ.items()
@@ -115,6 +115,8 @@ class MediaCliTests(unittest.TestCase):
         if base:
             command.extend(["--base-url", base])
         command.extend(args)
+        if unattended and "image" in args and "--unattended" not in args:
+            command.append("--unattended")
         return subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True, encoding="utf-8", timeout=15)
 
     def success(self, result):

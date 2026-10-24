@@ -1,3 +1,3 @@
 interface:
   display_name: "Relay Media"
-  short_description: "Generate images and videos through media relays"
+  short_description: "Generate images with guided model, prompt, resolution and quality choices"
